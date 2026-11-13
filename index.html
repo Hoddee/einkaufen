@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Einkaufsliste</title>
+<style>
+  :root{
+    --bg:#f6f5f1; --card:#ffffff; --text:#1d1d1b; --muted:#77756d; --line:#e4e2da;
+    --accent:#2f7d4f; --accent-text:#ffffff; --danger:#b3412f;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#161614; --card:#222220; --text:#f0efe9; --muted:#9a988f; --line:#34332f; --accent:#4fa774; --accent-text:#0e1a13; --danger:#e07a66; }
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:17px}
+  .wrap{max-width:560px;margin:0 auto;padding:max(16px,env(safe-area-inset-top)) 16px max(32px,env(safe-area-inset-bottom))}
+  header{display:flex;align-items:baseline;justify-content:space-between;margin:8px 0 14px}
+  h1{font-size:26px;margin:0;letter-spacing:-.01em}
+  .count{color:var(--muted);font-size:15px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px}
+  .paste{padding:12px}
+  textarea{width:100%;min-height:110px;resize:vertical;border:0;outline:0;background:transparent;color:var(--text);font:inherit;font-size:16px;line-height:1.4}
+  textarea::placeholder{color:var(--muted)}
+  .row{display:flex;gap:8px;margin-top:8px}
+  button{font:inherit;border:0;border-radius:12px;padding:12px 16px;cursor:pointer;color:var(--text);background:var(--line)}
+  button.primary{background:var(--accent);color:var(--accent-text);font-weight:600;flex:1}
+  button:active{opacity:.7}
+  .quick{display:flex;gap:8px;margin:12px 0}
+  .quick input{flex:1;min-width:0;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:12px;padding:12px 14px;font:inherit;font-size:16px;outline:0}
+  ul{list-style:none;margin:16px 0 0;padding:0;overflow:hidden}
+  li{display:flex;align-items:center;gap:12px;padding:14px 14px;border-bottom:1px solid var(--line);user-select:none}
+  li:last-child{border-bottom:0}
+  .box{flex:none;width:26px;height:26px;border-radius:8px;border:2px solid var(--muted);display:grid;place-items:center;font-size:16px;line-height:1;color:transparent}
+  li.done .box{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+  li .t{flex:1;word-break:break-word}
+  li.done .t{text-decoration:line-through;color:var(--muted)}
+  li .x{flex:none;background:transparent;color:var(--muted);padding:6px 10px;font-size:18px}
+  .empty{padding:28px 16px;text-align:center;color:var(--muted)}
+  .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .actions button{flex:1 1 auto;font-size:15px}
+  button.danger{color:var(--danger)}
+  .toast{position:fixed;left:50%;bottom:max(20px,env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--text);color:var(--bg);padding:12px 16px;border-radius:14px;display:none;align-items:center;gap:14px;font-size:15px;box-shadow:0 6px 24px rgba(0,0,0,.25);max-width:92vw}
+  .toast.show{display:flex}
+  .toast button{background:transparent;color:var(--accent);padding:0;font-weight:700}
+  @media (prefers-color-scheme: light){ .toast button{color:#7fd6a2} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Einkaufsliste</h1>
+    <span class="count" id="count"></span>
+  </header>
+
+  <div class="card paste">
+    <textarea id="paste" placeholder="WhatsApp-Nachricht hier einfügen …"></textarea>
+    <div class="row">
+      <button class="primary" id="addBtn">Zur Liste hinzufügen</button>
+    </div>
+  </div>
+
+  <form class="quick" id="quickForm">
+    <input id="quick" type="text" placeholder="Einzelnen Artikel tippen" autocomplete="off" enterkeyhint="done">
+    <button type="submit">+</button>
+  </form>
+
+  <ul class="card" id="list"></ul>
+
+  <div class="actions">
+    <button id="clearDone">Erledigte entfernen</button>
+    <button id="copyBtn">Liste kopieren</button>
+    <button id="clearAll" class="danger">Alles löschen</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"><span id="toastMsg"></span><button id="undoBtn">Rückgängig</button></div>
+
+<script>
+(function(){
+  var KEY = "einkaufsliste-v1";
+  var items = [];
+  var undoSnapshot = null, toastTimer = null, armedClear = false;
+
+  function load(){
+    try{ var raw = localStorage.getItem(KEY); if(raw){ var p = JSON.parse(raw); if(Array.isArray(p)) items = p; } }catch(e){}
+  }
+  function save(){ try{ localStorage.setItem(KEY, JSON.stringify(items)); }catch(e){} }
+
+  var SKIP = /(medien ausgeschlossen|nachricht wurde gelöscht|bild weggelassen|video weggelassen|sticker weggelassen|<.*weggelassen>|audio weggelassen|ende-zu-ende)/i;
+
+  function parse(text){
+    var out = [];
+    String(text).split(/\r?\n/).forEach(function(line){
+      var l = line.replace(/[‎‏‪-‮]/g, "").trim();
+      if(!l) return;
+      // WhatsApp-Zeitstempel + Absender: "[13.11.26, 12:03:11] Mama: " oder "13.11.2026, 12:03 - Mama: "
+      l = l.replace(/^\[?\d{1,2}\.\d{1,2}\.\d{2,4},?\s+\d{1,2}:\d{2}(:\d{2})?\]?\s*[-–]?\s*[^:]{1,40}:\s*/, "");
+      if(!l || SKIP.test(l)) return;
+      // Aufzählungszeichen / Nummerierung am Zeilenanfang
+      l = l.replace(/^(?:[-–—•*·▪●○☐□✅✔☑️]+\s*)+/u, "").replace(/^\d+[.)]\s+/, "");
+      // Trennen an Semikolon und Komma (außer Dezimalkomma wie 1,5)
+      l.split(/\s*;\s*|\s*,(?!\d)\s*/).forEach(function(part){
+        var t = part.trim().replace(/[.!\s]+$/, "");
+        if(t.length < 1) return;
+        t = t.charAt(0).toUpperCase() + t.slice(1);
+        out.push(t);
+      });
+    });
+    return out;
+  }
+
+  function norm(s){ return s.toLowerCase().replace(/\s+/g, " ").trim(); }
+
+  function addTexts(texts){
+    var have = {}; items.forEach(function(i){ have[norm(i.text)] = true; });
+    var added = 0, dup = 0;
+    texts.forEach(function(t){
+      var k = norm(t);
+      if(have[k]){ dup++; return; }
+      have[k] = true; added++;
+      items.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2,6), text: t, done: false });
+    });
+    return { added: added, dup: dup };
+  }
+
+  function snapshot(){ undoSnapshot = JSON.stringify(items); }
+
+  function toast(msg, withUndo){
+    document.getElementById("toastMsg").textContent = msg;
+    document.getElementById("undoBtn").style.display = withUndo ? "" : "none";
+    var el = document.getElementById("toast");
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function(){ el.classList.remove("show"); }, withUndo ? 6000 : 2500);
+  }
+
+  function render(){
+    var list = document.getElementById("list");
+    list.innerHTML = "";
+    if(!items.length){
+      var e = document.createElement("li");
+      e.className = "empty"; e.style.display = "block";
+      e.textContent = "Noch leer. Nachricht oben einfügen.";
+      list.appendChild(e);
+    }
+    var open = items.filter(function(i){ return !i.done; });
+    var done = items.filter(function(i){ return i.done; });
+    open.concat(done).forEach(function(i){
+      var li = document.createElement("li");
+      if(i.done) li.className = "done";
+      var box = document.createElement("span"); box.className = "box"; box.textContent = "✓";
+      var t = document.createElement("span"); t.className = "t"; t.textContent = i.text;
+      var x = document.createElement("button"); x.className = "x"; x.textContent = "✕"; x.setAttribute("aria-label","Entfernen");
+      li.appendChild(box); li.appendChild(t); li.appendChild(x);
+      li.addEventListener("click", function(ev){
+        if(ev.target === x){ snapshot(); items = items.filter(function(n){ return n.id !== i.id; }); save(); render(); toast("Entfernt", true); return; }
+        i.done = !i.done; save(); render();
+      });
+      list.appendChild(li);
+    });
+    document.getElementById("count").textContent = items.length ? (open.length + " offen" + (done.length ? " · " + done.length + " erledigt" : "")) : "";
+  }
+
+  function handlePaste(){
+    var ta = document.getElementById("paste");
+    var texts = parse(ta.value);
+    if(!texts.length){ toast("Nichts erkannt", false); return; }
+    snapshot();
+    var r = addTexts(texts);
+    ta.value = "";
+    save(); render();
+    toast(r.added + " hinzugefügt" + (r.dup ? " · " + r.dup + " doppelt übersprungen" : ""), true);
+  }
+
+  document.getElementById("addBtn").addEventListener("click", handlePaste);
+  // Direkt nach dem Einfügen automatisch verarbeiten
+  document.getElementById("paste").addEventListener("paste", function(){ setTimeout(handlePaste, 50); });
+
+  document.getElementById("quickForm").addEventListener("submit", function(ev){
+    ev.preventDefault();
+    var inp = document.getElementById("quick");
+    var texts = parse(inp.value);
+    if(!texts.length) return;
+    snapshot(); addTexts(texts); inp.value = ""; save(); render();
+  });
+
+  document.getElementById("clearDone").addEventListener("click", function(){
+    if(!items.some(function(i){ return i.done; })) return;
+    snapshot(); items = items.filter(function(i){ return !i.done; }); save(); render(); toast("Erledigte entfernt", true);
+  });
+
+  var clearBtn = document.getElementById("clearAll");
+  clearBtn.addEventListener("click", function(){
+    if(!items.length) return;
+    if(!armedClear){
+      armedClear = true; clearBtn.textContent = "Wirklich alles?";
+      setTimeout(function(){ armedClear = false; clearBtn.textContent = "Alles löschen"; }, 3000);
+      return;
+    }
+    armedClear = false; clearBtn.textContent = "Alles löschen";
+    snapshot(); items = []; save(); render(); toast("Liste geleert", true);
+  });
+
+  document.getElementById("copyBtn").addEventListener("click", function(){
+    var txt = items.filter(function(i){ return !i.done; }).map(function(i){ return "- " + i.text; }).join("\n");
+    if(!txt){ toast("Nichts zu kopieren", false); return; }
+    try{
+      navigator.clipboard.writeText(txt).then(function(){ toast("Kopiert", false); }, function(){ toast("Kopieren nicht möglich", false); });
+    }catch(e){ toast("Kopieren nicht möglich", false); }
+  });
+
+  document.getElementById("undoBtn").addEventListener("click", function(){
+    if(undoSnapshot){ try{ items = JSON.parse(undoSnapshot); }catch(e){} undoSnapshot = null; save(); render(); }
+    document.getElementById("toast").classList.remove("show");
+  });
+
+  load(); render();
+})();
+</script>
+</body>
+</html>
